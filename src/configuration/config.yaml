@@ -1,0 +1,3 @@
+logging_info:
+  component: "network-collector"
+  component_type: "python"
