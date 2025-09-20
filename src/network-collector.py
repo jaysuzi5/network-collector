@@ -36,14 +36,10 @@ class NetworkCollector:
         payload.pop('return_code')
         self._logger.transaction_event(EventType.TRANSACTION_END, transaction=self._transaction,
                                        payload=payload, return_code=return_code)
-        self._get_status_endpoint(status)
-        self._check_dns(status)
-        self._check_tcp_latency(status)
-        self._collect_internet_speed(status)
-        print(status)
 
     def _get_status_endpoint(self, status: dict, router_ip: str = "192.168.86.1") -> None:
         payload = {}
+        return_code = 200
         source_transaction = self._logger.transaction_event(EventType.SPAN_START, payload=payload,
                                                             source_component="Network: get_status_endpoint",
                                                             transaction=self._transaction)
@@ -75,16 +71,17 @@ class NetworkCollector:
             status["ethernet_link"] = json_response["wan"]["ethernetLink"]
             status["update_required"] = json_response["software"]["updateRequired"]
         except Exception as ex:
-            payload['return_code'] = 500
+            return_code= 500
             message = f"Exception with get_status_endpoint"
             payload["message"] = message
             stack_trace = traceback.format_exc()
             self._logger.message(message=message, exception=ex, stack_trace=stack_trace, transaction=source_transaction)
         self._logger.transaction_event(EventType.SPAN_END, transaction=source_transaction,
-                                       payload=payload, return_code=payload['return_code'])
+                                       payload=payload, return_code=return_code)
 
     def _check_dns(self, status: dict, host="kubernetes.default.svc.cluster.local") -> None:
         payload = {}
+        return_code = 200
         source_transaction = self._logger.transaction_event(EventType.SPAN_START, payload=payload,
                                                             source_component="Network: check_dns",
                                                             transaction=self._transaction)
@@ -92,18 +89,19 @@ class NetworkCollector:
             ip = socket.gethostbyname(host)
             status['dns'] = f"{host} resolved to {ip}"
         except Exception as ex:
-            payload['return_code'] = 500
+            return_code = 500
             message = f"Exception with check_dns"
             payload["message"] = message
             stack_trace = traceback.format_exc()
             self._logger.message(message=message, exception=ex, stack_trace=stack_trace, transaction=source_transaction)
         self._logger.transaction_event(EventType.SPAN_END, transaction=source_transaction,
-                                       payload=payload, return_code=payload['return_code'])
+                                       payload=payload, return_code=return_code)
 
 
     def _check_tcp_latency(self, status: dict, host="kubernetes.default.svc.cluster.local",
                            port=443, attempts=4) -> None:
         payload = {}
+        return_code = 200
         source_transaction = self._logger.transaction_event(EventType.SPAN_START, payload=payload,
                                                             source_component="Network: check_tcp_latency",
                                                             transaction=self._transaction)
@@ -118,17 +116,18 @@ class NetworkCollector:
             if times:
                 status['tcp_latency'] = sum(times) / len(times)
         except Exception as ex:
-            payload['return_code'] = 500
+            return_code = 500
             message = f"Exception with check_tcp_latency"
             payload["message"] = message
             stack_trace = traceback.format_exc()
             self._logger.message(message=message, exception=ex, stack_trace=stack_trace,
                                  transaction=source_transaction)
         self._logger.transaction_event(EventType.SPAN_END, transaction=source_transaction,
-                                       payload=payload, return_code=payload['return_code'])
+                                       payload=payload, return_code=return_code)
 
     def _collect_internet_speed(self, status: dict) -> None:
         payload = {}
+        return_code = 200
         source_transaction = self._logger.transaction_event(EventType.SPAN_START, payload=payload,
                                                             source_component="Network: collect_internet_speed",
                                                             transaction=self._transaction)
@@ -142,14 +141,14 @@ class NetworkCollector:
             status['internet_upload'] = upload_speed
             status['internet_ping'] = ping_result
         except Exception as ex:
-            payload['return_code'] = 500
+            return_code = 500
             message = f"Exception with collect_internet_speed"
             payload["message"] = message
             stack_trace = traceback.format_exc()
             self._logger.message(message=message, exception=ex, stack_trace=stack_trace,
                                  transaction=source_transaction)
         self._logger.transaction_event(EventType.SPAN_END, transaction=source_transaction,
-                                       payload=payload, return_code=payload['return_code'])
+                                       payload=payload, return_code=return_code)
 
     def _load_data(self, data: dict, payload: dict) -> None:
         payload['return_code'] = 200
