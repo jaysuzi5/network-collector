@@ -1,22 +1,12 @@
+import socket
+import json
 import requests
 import speedtest
 import subprocess
-import re
-
-mac_to_name = {
-    "8:b4:b1:23:fa:df": "Google Nest Wifi Router",
-    "24:d7:eb:9d:7a:0": "Living Room TV",
-    "c8:4a:a0:d8:7a:66": "John’s iPhone",
-    # Add more mappings as needed
-}
 
 
-# Configuration
-router_ip = "192.168.86.1"
-
-
-def _status_endpoint() -> dict:
-
+def get_status_endpoint() -> dict:
+    router_ip = "192.168.86.1"
     try:
         response = requests.get(f"http://{router_ip}/api/v1/status", timeout=5)
         response.raise_for_status()
@@ -28,7 +18,7 @@ def _status_endpoint() -> dict:
         uptime_minutes, _ = divmod(remainder, 60)
 
         lease_seconds = json_response['wan']['leaseDurationSeconds']
-        lease_days, remainder = divmod(uptime_seconds, 86400)
+        lease_days, remainder = divmod(lease_seconds, 86400)
         lease_hours, remainder = divmod(remainder, 3600)
         lease_minutes, _ = divmod(remainder, 60)
 
@@ -60,42 +50,68 @@ def _status_endpoint() -> dict:
 
     return status
 
-def _get_arp_table():
+def check_dns(host="kubernetes.default.svc.cluster.local"):
+    print("🔍 DNS Resolution Test")
     try:
-        result = subprocess.run(['arp', '-a'], capture_output=True, text=True)
-        arp_table = {}
-        for line in result.stdout.splitlines():
-            match = re.search(r'\(([\d.]+)\)\s+at\s+([0-9a-f:]+)', line)
-            if match:
-                ip, mac = match.groups()
-                arp_table[ip] = mac
-        return arp_table
+        ip = socket.gethostbyname(host)
+        print(f"✅ {host} resolved to {ip}")
+        return True
     except Exception as e:
-        print(f"Error retrieving ARP table: {str(e)}")
-        return {}
+        print(f"❌ DNS resolution failed for {host}: {e}")
+        return False
 
-def collect_network_details():
-    status = _status_endpoint()
-    arp_table = _get_arp_table()
-    status['devices'] = len(arp_table)
-    status['details'] = []
-    for ip, mac in arp_table.items():
-        if mac in mac_to_name:
-            name = mac_to_name[mac]
+
+def check_latency(host="kubernetes.default.svc.cluster.local", count=4):
+    print("\n📡 Latency Test (ping)")
+    try:
+        result = subprocess.run(
+            ["ping", "-c", str(count), host],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            print("✅ Ping successful:")
+            print(result.stdout)
+            return True
         else:
-            name = 'Unknown'
-        status['details'].append({
-            'ip': ip,
-            'mac': mac,
-            'name': name
-        })
-    return status
+            print("❌ Ping failed:")
+            print(result.stderr)
+            return False
+    except FileNotFoundError:
+        print("⚠️ 'ping' not installed in container")
+        return False
 
-def collect_network_summary():
-    status = _status_endpoint()
-    arp_table = _get_arp_table()
-    status['devices'] = len(arp_table)
-    return status
+
+def check_throughput(server="iperf-server", duration=5):
+    print("\n🚀 Throughput Test (iperf3)")
+    try:
+        result = subprocess.run(
+            ["iperf3", "-c", server, "-J", "-t", str(duration)],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            bps = data['end']['sum_received']['bits_per_second']
+            print(f"✅ Download: {bps / 1e6:.2f} Mbps")
+            return True
+        else:
+            print("❌ iperf3 test failed:")
+            print(result.stderr)
+            return False
+    except FileNotFoundError:
+        print("⚠️ iperf3 not installed in container")
+        return False
+
+
+if __name__ == "__main__":
+    print("=== Kubernetes Network Health Check ===\n")
+    check_dns()
+    check_latency()
+    # Requires an iperf3 server pod (see instructions below)
+    # check_throughput("iperf-server")
+
+
 
 def collect_internet_speed():
     st = speedtest.Speedtest()
@@ -119,19 +135,27 @@ def collect_internet_speed():
 
 def main():
     print('------------------------------------------------')
-    print('network summary')
+    print('get_status')
     print('------------------------------------------------')
-    status = collect_network_summary()
+    status = get_status_endpoint()
     print(status)
     print('------------------------------------------------')
+    print('check dns')
     print('------------------------------------------------')
-    print('network details')
-    print('------------------------------------------------')
-    status = collect_network_details()
+    status = check_dns()
     print(status)
     print('------------------------------------------------')
+    print('check througput')
     print('------------------------------------------------')
-    print('network details')
+    status = check_throughput()
+    print(status)
+    print('------------------------------------------------')
+    print('check latency')
+    print('------------------------------------------------')
+    status = check_latency()
+    print(status)
+    print('------------------------------------------------')
+    print('internet')
     print('------------------------------------------------')
     status = collect_internet_speed()
     print(status)
