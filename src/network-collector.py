@@ -1,166 +1,187 @@
+import time
 import socket
-import json
 import requests
 import speedtest
-import subprocess
+import os
+import traceback
+from dotenv import load_dotenv
+from jTookkit.jLogging import LoggingInfo, Logger, EventType
+from jTookkit.jConfig import Config
 
+class NetworkCollector:
+    def __init__(self, config):
+        self._config = config
+        logging_info = LoggingInfo(**self._config.get("logging_info", {}))
+        self._logger = Logger(logging_info)
+        self._local_api_base_url = os.getenv("LOCAL_API_BASE_URL")
+        self._transaction = None
 
-def get_status_endpoint() -> dict:
-    router_ip = "192.168.86.1"
-    try:
-        response = requests.get(f"http://{router_ip}/api/v1/status", timeout=5)
-        response.raise_for_status()
-        json_response = response.json()
+    def process(self):
+        payload = {}
+        status = {}
+        self._transaction = self._logger.transaction_event(EventType.TRANSACTION_START)
+        payload['return_code'] = 200
 
-        uptime_seconds = json_response["system"]["uptime"]
-        uptime_days, remainder = divmod(uptime_seconds, 86400)
-        uptime_hours, remainder = divmod(remainder, 3600)
-        uptime_minutes, _ = divmod(remainder, 60)
+        self._get_status_endpoint(status)
+        self._check_dns(status)
+        self._check_tcp_latency(status)
+        self._collect_internet_speed(status)
 
-        lease_seconds = json_response['wan']['leaseDurationSeconds']
-        lease_days, remainder = divmod(lease_seconds, 86400)
-        lease_hours, remainder = divmod(remainder, 3600)
-        lease_minutes, _ = divmod(remainder, 60)
-
-        status = {
-            "uptime_days": uptime_days,
-            "uptime_hours": uptime_hours,
-            "uptime_minutes": uptime_minutes,
-            "led_status": json_response["system"]["ledAnimation"],
-            "online": json_response["wan"]["online"],
-            "ip_method": json_response["wan"]["ipMethod"].upper(),
-            "ip_address": json_response["wan"]["localIpAddress"],
-            "gateway": json_response["wan"]["gatewayIpAddress"],
-            "local_ip_address": json_response["wan"]["localIpAddress"],
-            "lease_days": lease_days,
-            "lease_hours": lease_hours,
-            "lease_minutes": lease_minutes,
-            "dns_servers": ", ".join(json_response["wan"]["nameServers"]),
-            "ethernet_link": json_response["wan"]["ethernetLink"],
-            "update_required": json_response["software"]["updateRequired"]
-        }
-    except requests.exceptions.HTTPError as ex:
-        status = {
-            "Error": ex
-        }
-    except requests.exceptions.RequestException as ex:
-        status = {
-            "Error": ex
-        }
-
-    return status
-
-def check_dns(host="kubernetes.default.svc.cluster.local"):
-    print("🔍 DNS Resolution Test")
-    try:
-        ip = socket.gethostbyname(host)
-        print(f"✅ {host} resolved to {ip}")
-        return True
-    except Exception as e:
-        print(f"❌ DNS resolution failed for {host}: {e}")
-        return False
-
-
-def check_latency(host="kubernetes.default.svc.cluster.local", count=4):
-    print("\n📡 Latency Test (ping)")
-    try:
-        result = subprocess.run(
-            ["ping", "-c", str(count), host],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            print("✅ Ping successful:")
-            print(result.stdout)
-            return True
+        if status:
+            self._load_data(status, payload)
         else:
-            print("❌ Ping failed:")
-            print(result.stderr)
-            return False
-    except FileNotFoundError:
-        print("⚠️ 'ping' not installed in container")
-        return False
+            payload['message'] = 'Issue collecting network stats'
+            payload['return_code'] = 500
+        return_code = payload['return_code']
+        payload.pop('return_code')
+        self._logger.transaction_event(EventType.TRANSACTION_END, transaction=self._transaction,
+                                       payload=payload, return_code=return_code)
+        self._get_status_endpoint(status)
+        self._check_dns(status)
+        self._check_tcp_latency(status)
+        self._collect_internet_speed(status)
+        print(status)
+
+    def _get_status_endpoint(self, status: dict, router_ip: str = "192.168.86.1") -> None:
+        payload = {}
+        source_transaction = self._logger.transaction_event(EventType.SPAN_START, payload=payload,
+                                                            source_component="Network: get_status_endpoint",
+                                                            transaction=self._transaction)
+        try:
+            response = requests.get(f"http://{router_ip}/api/v1/status", timeout=5)
+            response.raise_for_status()
+            json_response = response.json()
+            uptime_seconds = json_response["system"]["uptime"]
+            uptime_days, remainder = divmod(uptime_seconds, 86400)
+            uptime_hours, remainder = divmod(remainder, 3600)
+            uptime_minutes, _ = divmod(remainder, 60)
+            lease_seconds = json_response['wan']['leaseDurationSeconds']
+            lease_days, remainder = divmod(lease_seconds, 86400)
+            lease_hours, remainder = divmod(remainder, 3600)
+            lease_minutes, _ = divmod(remainder, 60)
+            status["uptime_days"] = uptime_days
+            status["uptime_hours"] = uptime_hours
+            status["uptime_minutes"] = uptime_minutes
+            status["led_status"] = json_response["system"]["ledAnimation"]
+            status["online"] = json_response["wan"]["online"]
+            status["ip_method"] = json_response["wan"]["ipMethod"].upper()
+            status["ip_address"] = json_response["wan"]["localIpAddress"]
+            status["gateway"] = json_response["wan"]["gatewayIpAddress"]
+            status["local_ip_address"] = json_response["wan"]["localIpAddress"]
+            status["lease_days"] = lease_days
+            status["lease_hours"] = lease_hours
+            status["lease_minutes"] = lease_minutes
+            status["dns_servers"] = ", ".join(json_response["wan"]["nameServers"])
+            status["ethernet_link"] = json_response["wan"]["ethernetLink"]
+            status["update_required"] = json_response["software"]["updateRequired"]
+        except Exception as ex:
+            payload['return_code'] = 500
+            message = f"Exception with get_status_endpoint"
+            payload["message"] = message
+            stack_trace = traceback.format_exc()
+            self._logger.message(message=message, exception=ex, stack_trace=stack_trace, transaction=source_transaction)
+        self._logger.transaction_event(EventType.SPAN_END, transaction=source_transaction,
+                                       payload=payload, return_code=payload['return_code'])
+
+    def _check_dns(self, status: dict, host="kubernetes.default.svc.cluster.local") -> None:
+        payload = {}
+        source_transaction = self._logger.transaction_event(EventType.SPAN_START, payload=payload,
+                                                            source_component="Network: check_dns",
+                                                            transaction=self._transaction)
+        try:
+            ip = socket.gethostbyname(host)
+            status['dns'] = f"{host} resolved to {ip}"
+        except Exception as ex:
+            payload['return_code'] = 500
+            message = f"Exception with check_dns"
+            payload["message"] = message
+            stack_trace = traceback.format_exc()
+            self._logger.message(message=message, exception=ex, stack_trace=stack_trace, transaction=source_transaction)
+        self._logger.transaction_event(EventType.SPAN_END, transaction=source_transaction,
+                                       payload=payload, return_code=payload['return_code'])
 
 
-def check_throughput(server="iperf-server", duration=5):
-    print("\n🚀 Throughput Test (iperf3)")
-    try:
-        result = subprocess.run(
-            ["iperf3", "-c", server, "-J", "-t", str(duration)],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            bps = data['end']['sum_received']['bits_per_second']
-            print(f"✅ Download: {bps / 1e6:.2f} Mbps")
-            return True
-        else:
-            print("❌ iperf3 test failed:")
-            print(result.stderr)
-            return False
-    except FileNotFoundError:
-        print("⚠️ iperf3 not installed in container")
-        return False
+    def _check_tcp_latency(self, status: dict, host="kubernetes.default.svc.cluster.local",
+                           port=443, attempts=4) -> None:
+        payload = {}
+        source_transaction = self._logger.transaction_event(EventType.SPAN_START, payload=payload,
+                                                            source_component="Network: check_tcp_latency",
+                                                            transaction=self._transaction)
+        try:
+            times = []
+            for _ in range(attempts):
+                start = time.time()
+                s = socket.create_connection((host, port), timeout=2)
+                s.close()
+                elapsed = (time.time() - start) * 1000  # ms
+                times.append(elapsed)
+            if times:
+                status['tcp_latency'] = sum(times) / len(times)
+        except Exception as ex:
+            payload['return_code'] = 500
+            message = f"Exception with check_tcp_latency"
+            payload["message"] = message
+            stack_trace = traceback.format_exc()
+            self._logger.message(message=message, exception=ex, stack_trace=stack_trace,
+                                 transaction=source_transaction)
+        self._logger.transaction_event(EventType.SPAN_END, transaction=source_transaction,
+                                       payload=payload, return_code=payload['return_code'])
 
+    def _collect_internet_speed(self, status: dict) -> None:
+        payload = {}
+        source_transaction = self._logger.transaction_event(EventType.SPAN_START, payload=payload,
+                                                            source_component="Network: collect_internet_speed",
+                                                            transaction=self._transaction)
+        try:
+            st = speedtest.Speedtest()
+            st.get_best_server()
+            download_speed = st.download() / 1_000_000  # Convert from bits/s to Mbps
+            upload_speed = st.upload() / 1_000_000      # Convert from bits/s to Mbps
+            ping_result = st.results.ping
+            status['internet_download'] = download_speed
+            status['internet_upload'] = upload_speed
+            status['internet_ping'] = ping_result
+        except Exception as ex:
+            payload['return_code'] = 500
+            message = f"Exception with collect_internet_speed"
+            payload["message"] = message
+            stack_trace = traceback.format_exc()
+            self._logger.message(message=message, exception=ex, stack_trace=stack_trace,
+                                 transaction=source_transaction)
+        self._logger.transaction_event(EventType.SPAN_END, transaction=source_transaction,
+                                       payload=payload, return_code=payload['return_code'])
 
-if __name__ == "__main__":
-    print("=== Kubernetes Network Health Check ===\n")
-    check_dns()
-    check_latency()
-    # Requires an iperf3 server pod (see instructions below)
-    # check_throughput("iperf-server")
-
-
-
-def collect_internet_speed():
-    st = speedtest.Speedtest()
-
-    print("Finding best server...")
-    st.get_best_server()
-
-    print("Measuring download speed...")
-    download_speed = st.download() / 1_000_000  # Convert from bits/s to Mbps
-    print("Measuring upload speed...")
-    upload_speed = st.upload() / 1_000_000      # Convert from bits/s to Mbps
-    ping_result = st.results.ping
-
-    status = {
-        'download': download_speed,
-        'upload': upload_speed,
-        'ping': ping_result
-    }
-    return status
+    def _load_data(self, data: dict, payload: dict) -> None:
+        payload['return_code'] = 200
+        response = None
+        source_transaction = self._logger.transaction_event(EventType.SPAN_START, payload=payload,
+                                                            source_component="network: Local Insert",
+                                                            transaction=self._transaction)
+        try:
+            response = requests.post(self._local_api_base_url, json=data)
+            response.raise_for_status()
+            payload['inserted'] = 1
+        except Exception as ex:
+            payload['return_code']  = 500
+            data = {}
+            message = f"Exception inserting Network data locally"
+            payload["message"] = message
+            stack_trace = traceback.format_exc()
+            if response:
+                data['status_code'] = response.status_code
+                data['response.text'] = response.text
+            self._logger.message(message=message, exception=ex, stack_trace=stack_trace, data=data,
+                                 transaction=source_transaction)
+        self._logger.transaction_event(EventType.SPAN_END, transaction=source_transaction,
+                                       payload=payload, return_code=payload['return_code'] )
 
 
 def main():
-    print('------------------------------------------------')
-    print('get_status')
-    print('------------------------------------------------')
-    status = get_status_endpoint()
-    print(status)
-    print('------------------------------------------------')
-    print('check dns')
-    print('------------------------------------------------')
-    status = check_dns()
-    print(status)
-    print('------------------------------------------------')
-    print('check througput')
-    print('------------------------------------------------')
-    status = check_throughput()
-    print(status)
-    print('------------------------------------------------')
-    print('check latency')
-    print('------------------------------------------------')
-    status = check_latency()
-    print(status)
-    print('------------------------------------------------')
-    print('internet')
-    print('------------------------------------------------')
-    status = collect_internet_speed()
-    print(status)
-    print('------------------------------------------------')
+    load_dotenv()
+    config = Config()
+    network = NetworkCollector(config)
+    network.process()
+
 
 if __name__ == "__main__":
     main()
-
